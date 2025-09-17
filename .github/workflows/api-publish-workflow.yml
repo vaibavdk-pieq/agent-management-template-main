@@ -1,0 +1,334 @@
+name: "agent-management"
+
+on:
+  workflow_run:
+    workflows: ["Dev-Test"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  # AWS Configuration
+  AWS_REGION: "us-east-1"
+  AWS_ROLE_ARN: "arn:aws:iam::910020091862:role/git-access-role"
+  
+  # CodeArtifact Configuration
+  CODEARTIFACT_DOMAIN: "pieq"
+  CODEARTIFACT_DOMAIN_OWNER: "910020091862"
+  CODEARTIFACT_REGION: "us-east-1"
+  CODEARTIFACT_REPOSITORY: "pieq-artifact"
+
+permissions:
+  actions: read
+  contents: write
+  id-token: write
+
+jobs:
+  publish_client:
+    name: "agent-management"
+    runs-on: ubuntu-latest
+    if: |
+      (github.event.workflow_run.conclusion == 'success') || 
+      (github.event_name == 'workflow_dispatch')
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure AWS credentials using OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Get CodeArtifact token
+        id: codeartifact-auth
+        run: |
+          echo "🔐 Getting CodeArtifact authorization token for publishing..."
+          
+          echo "📋 Using CodeArtifact configuration:"
+          echo "   Domain: ${{ env.CODEARTIFACT_DOMAIN }}"
+          echo "   Domain Owner: ${{ env.CODEARTIFACT_DOMAIN_OWNER }}"
+          echo "   Region: ${{ env.CODEARTIFACT_REGION }}"
+          echo "   Repository: ${{ env.CODEARTIFACT_REPOSITORY }}"
+          
+          # Get authorization token
+          export CODEARTIFACT_AUTH_TOKEN=$(aws codeartifact get-authorization-token \
+            --domain "${{ env.CODEARTIFACT_DOMAIN }}" \
+            --domain-owner "${{ env.CODEARTIFACT_DOMAIN_OWNER }}" \
+            --region "${{ env.CODEARTIFACT_REGION }}" \
+            --query "authorizationToken" \
+            --output text)
+          
+          if [ -z "$CODEARTIFACT_AUTH_TOKEN" ]; then
+            echo "❌ Failed to get CodeArtifact token"
+            exit 1
+          fi
+          
+          echo "✅ CodeArtifact token retrieved successfully!"
+          echo "   Token preview: ${CODEARTIFACT_AUTH_TOKEN:0:20}..."
+          
+          # Set environment variable for Gradle
+          echo "CODEARTIFACT_AUTH_TOKEN=$CODEARTIFACT_AUTH_TOKEN" >> $GITHUB_ENV
+
+      - name: Setup Java and Gradle
+        uses: gradle/gradle-build-action@v2
+        with:
+          gradle-version: wrapper
+
+      - name: Increment Version
+        run: |
+          echo "🔢 Incrementing version for agent-management-client..."
+          
+          # Checkout the main branch to avoid detached HEAD issues
+          echo "🌿 Checking out main branch..."
+          git checkout main || git checkout -b main
+          
+          # Show current repository state
+          echo "📋 Current repository state:"
+          echo "   Working directory: $(pwd)"
+          echo "   Git branch: $(git branch --show-current)"
+          echo "   Git commit: $(git rev-parse --short HEAD)"
+          echo "   File permissions:"
+          ls -la agent-management-client/build.gradle.kts
+          echo "   Current build.gradle.kts content:"
+          grep 'version = ' agent-management-client/build.gradle.kts
+          
+          # Read current version from gradle.properties (more reliable)
+          CURRENT_VERSION=$(grep '^version=' gradle.properties | cut -d'=' -f2)
+          echo "📋 Current version: $CURRENT_VERSION"
+          
+          # Extract version parts (e.g., 1.0.0 -> 1 0 0)
+          # Use a more compatible approach for version parsing
+          MAJOR=$(echo "$CURRENT_VERSION" | cut -d'.' -f1)
+          MINOR=$(echo "$CURRENT_VERSION" | cut -d'.' -f2)
+          PATCH=$(echo "$CURRENT_VERSION" | cut -d'.' -f3)
+          
+          # Increment patch version
+          NEW_PATCH=$((PATCH + 1))
+          NEW_VERSION="$MAJOR.$MINOR.$NEW_PATCH"
+          
+          echo "📋 New version: $NEW_VERSION"
+          
+          # Update version in both build.gradle.kts and gradle.properties
+          echo "🔄 Updating version from $CURRENT_VERSION to $NEW_VERSION..."
+          
+          # Update agent-management-client/build.gradle.kts (update the fallback value)
+          sed "s/version = project.findProperty(\"version\") as String? ?: \"$CURRENT_VERSION\"/version = project.findProperty(\"version\") as String? ?: \"$NEW_VERSION\"/" agent-management-client/build.gradle.kts > agent-management-client/build.gradle.kts.tmp
+          mv agent-management-client/build.gradle.kts.tmp agent-management-client/build.gradle.kts
+          
+          # Update gradle.properties
+          sed "s/^version=$CURRENT_VERSION$/version=$NEW_VERSION/" gradle.properties > gradle.properties.tmp
+          mv gradle.properties.tmp gradle.properties
+          
+          # Show the diff
+          echo "📋 File changes:"
+          echo "   gradle.properties: $CURRENT_VERSION -> $NEW_VERSION"
+          echo "   build.gradle.kts fallback: $CURRENT_VERSION -> $NEW_VERSION"
+          
+          # Verify the changes
+          echo "✅ Version updated in build.gradle.kts:"
+          grep 'version = ' agent-management-client/build.gradle.kts
+          echo "✅ Version updated in gradle.properties:"
+          grep '^version=' gradle.properties
+          
+          # Show the actual content for debugging
+          echo "🔍 Final file contents:"
+          echo "   gradle.properties version line:"
+          grep '^version=' gradle.properties
+          echo "   build.gradle.kts version line:"
+          grep 'version = ' agent-management-client/build.gradle.kts
+          
+          # Set version for next steps
+          echo "NEW_VERSION=$NEW_VERSION" >> $GITHUB_ENV
+          
+          # Commit the version change back to the repository
+          echo "📝 Committing version change to repository..."
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add agent-management-client/build.gradle.kts gradle.properties
+          git commit -m "chore: bump agent-management-client version to $NEW_VERSION [skip ci]"
+          
+          # Push to the main branch using GitHub token
+          echo "📤 Pushing changes to main branch..."
+          git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+          git push origin main
+          
+          # Verify the commit
+          echo "✅ Version change committed successfully:"
+          echo "   New version: $NEW_VERSION"
+          echo "   Updated build.gradle.kts:"
+          grep 'version = ' agent-management-client/build.gradle.kts
+
+      - name: Build agent-management-client
+        run: |
+          echo "🏗️ Building agent-management-client module..."
+          
+          # Display version information
+          echo "📋 Version Information:"
+          echo "   Version: $NEW_VERSION"
+          echo "   Git Hash: $(git rev-parse --short HEAD)"
+          echo "   Full Hash: $(git rev-parse HEAD)"
+          echo "   Branch: $(git branch --show-current)"
+          echo "   Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          
+          # Verify the version in build.gradle.kts
+          echo "🔍 Verifying version in build.gradle.kts:"
+          grep 'version = ' agent-management-client/build.gradle.kts
+          
+          # Build with the new version
+          echo "🔨 Running Gradle build command:"
+          echo "   ./gradlew :agent-management-client:build -x test -Pversion=$NEW_VERSION"
+          ./gradlew :agent-management-client:build -x test -Pversion=$NEW_VERSION
+          
+          echo "📦 Checking build artifacts..."
+          ls -la agent-management-client/build/libs/
+          
+          # Display the generated version
+          echo "📋 Generated JAR version:"
+          ./gradlew :agent-management-client:properties -Pversion=$NEW_VERSION | grep "version:"
+          
+          # Show the actual JAR file name
+          echo "📦 Generated JAR files:"
+          ls -la agent-management-client/build/libs/ | grep "agent-management-client"
+          
+          echo "✅ agent-management-client build completed successfully!"
+
+      - name: Publish agent-management-client to CodeArtifact
+        run: |
+          echo "📤 Publishing agent-management-client to CodeArtifact..."
+          echo "📋 Publishing version: $NEW_VERSION"
+          
+          # Verify version before publishing
+          echo "🔍 Final version verification:"
+          echo "   Environment variable NEW_VERSION: $NEW_VERSION"
+          echo "   build.gradle.kts version:"
+          grep 'version = ' agent-management-client/build.gradle.kts
+          echo "   Gradle properties version (without -Pversion):"
+          ./gradlew :agent-management-client:properties | grep "version:"
+          echo "   Gradle properties version (with -Pversion=$NEW_VERSION):"
+          ./gradlew :agent-management-client:properties -Pversion=$NEW_VERSION | grep "version:"
+          
+          # Check if version already exists in CodeArtifact
+          echo "🔍 Checking if version $NEW_VERSION already exists in CodeArtifact..."
+          if aws codeartifact list-package-versions \
+            --domain ${{ env.CODEARTIFACT_DOMAIN }} \
+            --domain-owner ${{ env.CODEARTIFACT_DOMAIN_OWNER }} \
+            --repository ${{ env.CODEARTIFACT_REPOSITORY }} \
+            --format maven \
+            --namespace com.pieq.agentmanagement.agentmanagement \
+            --package agent-management-client \
+            --region ${{ env.CODEARTIFACT_REGION }} \
+            --query "versions[?version=='$NEW_VERSION']" \
+            --output text 2>/dev/null | grep -q "$NEW_VERSION"; then
+            echo "⚠️ Version $NEW_VERSION already exists in CodeArtifact"
+            echo "   This might cause a conflict. Continuing with publish..."
+          else
+            echo "✅ Version $NEW_VERSION does not exist in CodeArtifact"
+          fi
+          
+          # Publish the agent-management-client JAR to CodeArtifact
+          echo "📤 Running Gradle publish command:"
+          echo "   ./gradlew :agent-management-client:publishMavenPublicationToAws-codeartifactRepository -Pversion=$NEW_VERSION"
+          ./gradlew :agent-management-client:publishMavenPublicationToAws-codeartifactRepository -Pversion=$NEW_VERSION
+          
+          echo "✅ agent-management-client published successfully to CodeArtifact!"
+          
+          # Verify the publication with retry logic
+          echo "🔍 Verifying publication..."
+          
+          # Wait a moment for the package to be available
+          echo "⏳ Waiting for package to be available in CodeArtifact..."
+          sleep 10
+          
+          # Retry verification up to 3 times
+          for i in {1..3}; do
+            echo "🔍 Verification attempt $i/3..."
+            
+            # First check if the package exists
+            if aws codeartifact list-packages \
+              --domain ${{ env.CODEARTIFACT_DOMAIN }} \
+              --domain-owner ${{ env.CODEARTIFACT_DOMAIN_OWNER }} \
+              --repository ${{ env.CODEARTIFACT_REPOSITORY }} \
+              --format maven \
+              --namespace com.pieq.agentmanagement.agentmanagement \
+              --region ${{ env.CODEARTIFACT_REGION }} \
+              --query "packages[?package=='agent-management-client']" \
+              --output text 2>/dev/null | grep -q "agent-management-client"; then
+              
+              echo "✅ Package 'agent-management-client' found in repository!"
+              
+              # Now try to list versions
+              if aws codeartifact list-package-versions \
+                --domain ${{ env.CODEARTIFACT_DOMAIN }} \
+                --domain-owner ${{ env.CODEARTIFACT_DOMAIN_OWNER }} \
+                --repository ${{ env.CODEARTIFACT_REPOSITORY }} \
+                --format maven \
+                --namespace com.pieq.agentmanagement.agentmanagement \
+                --package agent-management-client \
+                --region ${{ env.CODEARTIFACT_REGION }} 2>/dev/null; then
+                echo "✅ Package versions listed successfully!"
+                break
+              else
+                echo "⚠️ Package exists but versions not yet available"
+              fi
+            else
+              if [ $i -eq 3 ]; then
+                echo "⚠️ Package verification failed after 3 attempts, but publishing may have succeeded"
+                echo "   This is often due to eventual consistency in CodeArtifact"
+                echo "   The package should be available shortly"
+                echo "   You can manually verify by running:"
+                echo "   aws codeartifact list-packages --domain ${{ env.CODEARTIFACT_DOMAIN }} --repository ${{ env.CODEARTIFACT_REPOSITORY }} --format maven --namespace com.pieq.agentmanagement.agentmanagement"
+              else
+                echo "⏳ Package not yet available, waiting 15 seconds before retry..."
+                sleep 15
+              fi
+            fi
+          done
+        continue-on-error: true
+
+      - name: Create Publication Summary
+        run: |
+          echo "📋 Publication Summary"
+          echo "===================="
+          echo "✅ Package: com.pieq.agentmanagement.agentmanagement:agent-management-client"
+          echo "✅ Version: $NEW_VERSION"
+          echo "✅ Repository: ${{ env.CODEARTIFACT_REPOSITORY }}"
+          echo "✅ Domain: ${{ env.CODEARTIFACT_DOMAIN }}"
+          echo "✅ Region: ${{ env.CODEARTIFACT_REGION }}"
+          echo ""
+          echo "🔗 Usage in other projects:"
+          echo "   Add to build.gradle.kts:"
+          echo "   implementation(\"com.pieq.agentmanagement.agentmanagement:agent-management-client:$NEW_VERSION\")"
+          echo ""
+          echo "📦 JAR Location: agent-management-client/build/libs/agent-management-client-$NEW_VERSION.jar"
+
+      - name: Create GitHub Release (Optional)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          echo "📋 Creating GitHub Release..."
+          echo "This step can be extended to create a GitHub release with the published JAR"
+          echo "Version: $(./gradlew :agent-management-client:properties -q | grep "version:" | cut -d' ' -f2)"
+
+      - name: Cleanup
+        if: always()
+        run: |
+          echo "🧹 Cleaning up..."
+          rm -f codeartifact.token
+          echo "✅ Cleanup completed"
+
+  notify_failure:
+    name: "agent-management"
+    runs-on: ubuntu-latest
+    if: failure()
+    steps:
+      - name: Notify Failure
+        run: |
+          echo "❌ CodeArtifact publishing failed!"
+          echo "Please check the logs and retry if necessary."
+          echo "You can also trigger a manual publish using workflow_dispatch."
+

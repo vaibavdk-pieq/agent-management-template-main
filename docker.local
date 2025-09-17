@@ -1,0 +1,109 @@
+# Production Dockerfile for Kotlin Dropwizard application with CodeArtifact support
+# Stage 1: Build stage
+FROM openjdk:21-slim AS builder
+
+# Set working directory
+WORKDIR /app
+
+# Install necessary packages for build
+RUN apt-get update && apt-get install -y \
+    curl \
+    bash \
+    git \
+    awscli
+
+# Copy Gradle wrapper files
+COPY gradlew ./
+COPY gradle/ gradle/
+COPY gradle.properties ./
+
+# Make gradlew executable
+RUN chmod +x ./gradlew
+
+# Copy build configuration files
+COPY build.gradle.kts ./
+COPY settings.gradle.kts ./
+
+# Parameterize module names to allow renaming via build args
+ARG MODULE_API=agent-management-api
+ARG MODULE_APP=agent-management-application
+ARG MODULE_CLIENT=agent-management-client
+ENV MODULE_API=${MODULE_API}
+ENV MODULE_APP=${MODULE_APP}
+ENV MODULE_CLIENT=${MODULE_CLIENT}
+
+# Copy source code
+COPY ${MODULE_API}/ ./${MODULE_API}/
+COPY ${MODULE_APP}/ ./${MODULE_APP}/
+COPY ${MODULE_CLIENT}/ ./${MODULE_CLIENT}/
+
+# Set environment variables for build
+ENV JAVA_VERSION=21
+ENV KOTLIN_VERSION=1.9.22
+ENV PIEQ_ENVIRONMENT=prod
+
+# Build arguments for aws CodeArtifact
+ARG CODEARTIFACT_DOMAIN
+ARG CODEARTIFACT_DOMAIN_OWNER
+ARG CODEARTIFACT_REGION
+ARG CODEARTIFACT_REPOSITORY
+ARG AWS_ROLE_ARN
+ARG CODEARTIFACT_TOKEN
+
+# Set CodeArtifact environment variables
+ENV CODEARTIFACT_DOMAIN=${CODEARTIFACT_DOMAIN}
+ENV CODEARTIFACT_DOMAIN_OWNER=${CODEARTIFACT_DOMAIN_OWNER}
+ENV CODEARTIFACT_REGION=${CODEARTIFACT_REGION}
+ENV CODEARTIFACT_REPOSITORY=${CODEARTIFACT_REPOSITORY}
+ENV CODEARTIFACT_TOKEN=${CODEARTIFACT_TOKEN}
+
+# Build the application with CodeArtifact support
+# The build.gradle.kts will handle CodeArtifact authentication using the token
+RUN ./gradlew clean build -x test --no-daemon
+
+# Debug: List the generated JAR files
+RUN ls -la ${MODULE_APP}/build/libs/
+
+# Stage 2: Runtime stage
+FROM openjdk:21-slim AS runtime
+
+# Install necessary packages for runtime
+RUN apt-get update && apt-get install -y \
+    curl \
+    bash \
+    tzdata
+
+# Set timezone
+ENV TZ=UTC
+
+# Create application user
+RUN groupadd -g 1001 appgroup && \
+    useradd -u 1001 -g appgroup -m appuser
+
+# Set working directory
+WORKDIR /app
+
+# Copy the built JAR from builder stage
+COPY --from=builder /app/${MODULE_APP}/build/libs/${MODULE_APP}.jar ./app.jar
+
+# Copy configuration files
+COPY --from=builder /app/${MODULE_APP}/src/main/resources/config_dev.yml ./config.yml
+
+# Change ownership to app user
+RUN chown -R appuser:appgroup /app
+
+# Switch to app user
+USER appuser
+
+# Expose ports
+EXPOSE 8080 8081
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:8081/healthcheck || exit 1
+
+# Set JVM options for production
+ENV JAVA_OPTS="-Xms512m -Xmx1024m -XX:+UseG1GC -XX:+UseContainerSupport -XX:MaxRAMPercentage=75.0"
+
+# Application entry point
+ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -jar app.jar server config.yml"] 

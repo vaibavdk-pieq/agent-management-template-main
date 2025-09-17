@@ -1,0 +1,408 @@
+name: "agent-management"
+
+on:
+  push:
+    branches: [ main ]
+  workflow_run:
+    workflows: ["Dev-Test"]
+    types:
+      - completed
+    branches: [main]
+
+permissions:
+  contents: write
+  id-token: write
+
+env:
+ 
+  # AWS Configuration
+  AWS_REGION: "us-east-1"
+  ECR_REPOSITORY: "preprod-agent-management-api-template"
+  ALB_RULE_PRIORITY: 100
+  HEALTH_CHECK_PATH: "/api/users/health/load-balancer"
+  AWS_ROLE_ARN: "arn:aws:iam::910020091862:role/git-access-role"
+ 
+  # CodeArtifact Configuration (now centralized in gradle.properties)
+  # All CodeArtifact settings are managed through gradle.properties and setup script
+jobs:
+  tag_and_push_ecr:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.next_release_tag }}
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}  
+    steps:
+      - name: Checkout repository with history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate release tag
+        id: tag
+        uses: amitsingh-007/next-release-tag@v6.1.0
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          tag_prefix: ''
+          tag_template: 'yyyy.mm.dd.i'
+
+      - name: Create and push Git tag
+        run: |
+          git tag ${{ steps.tag.outputs.next_release_tag }}
+          git push origin ${{ steps.tag.outputs.next_release_tag }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Debug variables
+        run: |
+          echo "Registry: ${{ steps.login-ecr.outputs.registry }}"
+          echo "Repository: ${{ env.ECR_REPOSITORY }}"
+          echo "Full image reference: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:tag"
+    
+      - name: Set up JDK 21 (Amazon Corretto)
+        uses: actions/setup-java@v4
+        with:
+          distribution: corretto
+          java-version: 21
+          cache: gradle
+
+      - name: Grant Gradle wrapper exec permission
+        run: chmod +x ./gradlew
+
+      - name: Get CodeArtifact token
+        id: codeartifact-auth
+        run: |
+          CODEARTIFACT_DOMAIN=pieq
+          CODEARTIFACT_DOMAIN_OWNER=910020091862
+          CODEARTIFACT_REGION=us-east-1
+          CODEARTIFACT_REPOSITORY=pieq-artifact
+
+          export CODEARTIFACT_AUTH_TOKEN=$(aws codeartifact get-authorization-token \
+            --domain "$CODEARTIFACT_DOMAIN" \
+            --domain-owner "$CODEARTIFACT_DOMAIN_OWNER" \
+            --query authorizationToken \
+            --output text)
+
+          echo "CODEARTIFACT_AUTH_TOKEN=$CODEARTIFACT_AUTH_TOKEN" >> $GITHUB_ENV
+          export CODEARTIFACT_REPO_URL=$(aws codeartifact get-repository-endpoint \
+            --domain "$CODEARTIFACT_DOMAIN" \
+            --domain-owner "$CODEARTIFACT_DOMAIN_OWNER" \
+            --repository "$CODEARTIFACT_REPOSITORY" \
+            --format maven \
+            --query repositoryEndpoint \
+            --output text)
+
+          echo "CODEARTIFACT_REPO_URL=$CODEARTIFACT_REPO_URL" >> $GITHUB_ENV
+
+          # Debug: Verify CodeArtifact variables
+          echo "🔍 CodeArtifact Debug Info:"
+          echo "Domain: $CODEARTIFACT_DOMAIN"
+          echo "Domain Owner: $CODEARTIFACT_DOMAIN_OWNER"
+          echo "Repository: $CODEARTIFACT_REPOSITORY"
+          echo "Auth Token Length: ${#CODEARTIFACT_AUTH_TOKEN}"
+          echo "Repo URL: $CODEARTIFACT_REPO_URL"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          platforms: linux/amd64
+
+      - name: Configure builder for single platform
+        run: |
+          echo "🔧 Configuring builder for linux/amd64 only..."
+          # Remove any existing builders that might have multi-platform config
+          docker buildx rm amd64-builder || true
+          docker buildx rm multi-platform-builder || true
+          
+          # Create a new builder specifically for AMD64
+          docker buildx create --use --name amd64-builder --platform linux/amd64
+          docker buildx inspect --bootstrap
+          
+          # Verify the builder configuration
+          echo "📋 Current builder configuration:"
+          docker buildx ls
+
+      - name: Validate Dockerfile
+        run: |
+          if [ ! -f "Dockerfile" ]; then
+            echo "❌ Dockerfile not found!"
+            exit 1
+          fi
+          echo "✅ Dockerfile found"
+          docker buildx build --dry-run . || echo "⚠️ Dockerfile syntax check completed"
+
+      - name: Pre-warm Docker cache
+        run: |
+          echo "🔥 Pre-warming Docker cache..."
+          # Set default platform to avoid multi-platform builds
+          export DOCKER_DEFAULT_PLATFORM=linux/amd64
+          
+          # Pull the latest image to warm up the cache
+          docker pull ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest || echo "No previous image found, continuing..."
+          docker pull ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:cache || echo "No cache image found, continuing..."
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        timeout-minutes: 15
+        env:
+          DOCKER_DEFAULT_PLATFORM: linux/amd64
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.tag.outputs.next_release_tag }}
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+          cache-from: |
+            type=registry,ref=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:cache
+            type=registry,ref=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+            type=gha
+          cache-to: |
+            type=registry,ref=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:cache,mode=max
+            type=gha,mode=max
+          platforms: linux/amd64
+          build-args: |
+            CODEARTIFACT_AUTH_TOKEN=${{ env.CODEARTIFACT_AUTH_TOKEN }}
+            CODEARTIFACT_REPO_URL=${{ env.CODEARTIFACT_REPO_URL }}
+          # Performance optimizations
+          provenance: false
+          sbom: false
+      
+  
+  deploy_with_terraform:
+    needs: tag_and_push_ecr
+    runs-on: ubuntu-latest
+    environment: prepod
+    steps:
+      - name: Checkout terraform repository
+        uses: actions/checkout@v4
+        with:
+          repository: pieq-ai/pieq-ecs-terraform-v1
+          ref: main
+          path: terraform-repo
+          token: ${{ secrets.PAT_ACCESS_TOKEN }}
+          fetch-depth: 1
+          sparse-checkout: |
+            terraform/
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.7.0"
+
+      - name: Verify Terraform Installation
+        working-directory: terraform-repo/terraform/ecs-services/common-service
+        run: |
+          echo "🔍 Terraform Installation Verification..."
+          echo "Terraform Version: $(terraform version)"
+          echo "Terraform Path: $(which terraform)"
+          echo "Working Directory: $(pwd)"
+          echo "Available Terraform Files:"
+          ls -la *.tf 2>/dev/null || echo "No .tf files found in current directory"
+        continue-on-error: false
+
+      - name: Check Network Connectivity
+        working-directory: terraform-repo/terraform/ecs-services/common-service
+        run: |
+          echo "🌐 Checking network connectivity to Terraform registry..."
+          
+          # Test connection to Terraform registry
+          if curl -s --connect-timeout 10 "https://registry.terraform.io" > /dev/null; then
+            echo "✅ Can reach Terraform registry"
+          else
+            echo "❌ Cannot reach Terraform registry"
+            exit 1
+          fi
+          
+          # Test connection to GitHub releases
+          if curl -s --connect-timeout 10 "https://github.com" > /dev/null; then
+            echo "✅ Can reach GitHub"
+          else
+            echo "❌ Cannot reach GitHub"
+            exit 1
+          fi
+          
+          echo "🌐 Network connectivity verified"
+        continue-on-error: false
+
+      - name: Terraform Init
+        working-directory: terraform-repo/terraform/ecs-services/common-service
+        run: |
+          # Clean up any existing .terraform directory to avoid provider conflicts
+          rm -rf .terraform .terraform.lock.hcl
+          
+          # Initialize Terraform with backend config
+          terraform init -upgrade -reconfigure -backend-config="key=ecs-services/${{ env.ECR_REPOSITORY }}/terraform.tfstate"
+          
+          # Verify providers are downloaded
+          echo "🔍 Checking Terraform providers..."
+          terraform providers
+        continue-on-error: false
+
+      - name: Force Provider Download
+        working-directory: terraform-repo/terraform/ecs-services/common-service
+        run: |
+          # Force download of providers if needed
+          echo "🔄 Forcing provider download..."
+          terraform init -upgrade
+          
+          # Show provider status
+          echo "📦 Provider plugins directory:"
+          ls -la .terraform/providers/ 2>/dev/null || echo "No providers directory found"
+          
+          # Verify AWS provider specifically
+          echo "🔍 Checking AWS provider..."
+          if [ -d ".terraform/providers/registry.terraform.io/hashicorp/aws" ]; then
+            echo "✅ AWS provider found"
+            ls -la .terraform/providers/registry.terraform.io/hashicorp/aws/
+          else
+            echo "❌ AWS provider not found - attempting manual download"
+            terraform init -backend-config="key=ecs-services/${{ env.ECR_REPOSITORY }}/terraform.tfstate" -upgrade
+          fi
+        continue-on-error: false
+
+      - name: Verify Providers Before Validation
+        working-directory: terraform-repo/terraform/ecs-services/common-service
+        run: |
+          echo "🔍 Final Provider Verification..."
+          
+          # Check if .terraform directory exists
+          if [ ! -d ".terraform" ]; then
+            echo "❌ .terraform directory not found - reinitializing"
+            terraform init -backend-config="key=ecs-services/${{ env.ECR_REPOSITORY }}/terraform.tfstate"
+            exit 1
+          fi
+          
+          # Check if AWS provider exists
+          if [ ! -d ".terraform/providers/registry.terraform.io/hashicorp/aws" ]; then
+            echo "❌ AWS provider not found - reinitializing"
+            terraform init -backend-config="key=ecs-services/${{ env.ECR_REPOSITORY }}/terraform.tfstate" -upgrade
+            exit 1
+          fi
+          
+          # Show final provider status
+          echo "✅ All providers verified:"
+          terraform providers
+          
+          # Show provider files
+          echo "📦 Provider files:"
+          find .terraform/providers -name "*.exe" -o -name "terraform-provider-*" | head -10
+        continue-on-error: false
+
+      - name: Reinforced Terraform Init
+        working-directory: terraform-repo/terraform/ecs-services/common-service
+        run: |
+          echo "🔄 Reinforced Terraform Initialization..."
+          
+          # Check Terraform configuration first
+          echo "🔍 Checking Terraform configuration files..."
+          echo "Main configuration:"
+          cat *.tf | grep -E "(provider|terraform)" || echo "No provider/terraform blocks found"
+          
+          # Force complete reinitialization with all flags
+          echo "🧹 Complete cleanup..."
+          rm -rf .terraform .terraform.lock.hcl
+          
+          echo "📥 Initializing with backend config..."
+          terraform init \
+            -backend-config="key=ecs-services/${{ env.ECR_REPOSITORY }}/terraform.tfstate" \
+            -backend-config="bucket=pieq-terraform-state" \
+            -backend-config="region=us-east-1"
+          
+          echo "🔄 Upgrading providers..."
+          terraform init -upgrade
+          
+          echo "🔍 Verifying provider download..."
+          terraform providers
+          
+          # Final verification - check if AWS provider binary exists
+          echo "📦 Checking AWS provider binary..."
+          if find .terraform/providers -name "*aws*" -type f | grep -q .; then
+            echo "✅ AWS provider binary found"
+            find .terraform/providers -name "*aws*" -type f
+          else
+            echo "❌ AWS provider binary not found - attempting one more time"
+            terraform init -upgrade -force-copy
+            terraform providers
+          fi
+        continue-on-error: false
+
+      - name: Additional Terraform Init
+        working-directory: terraform-repo/terraform/ecs-services/common-service
+        run: |
+          echo "🔄 Additional Terraform Initialization for Extra Assurance..."
+          
+          # One more terraform init to ensure everything is properly set up
+          echo "📥 Final initialization..."
+          terraform init
+          
+          # Show final provider status
+          echo "🔍 Final provider status:"
+          terraform providers
+          
+          # Verify AWS provider one more time
+          echo "📦 Final AWS provider check:"
+          if [ -d ".terraform/providers/registry.terraform.io/hashicorp/aws" ]; then
+            echo "✅ AWS provider confirmed available"
+            ls -la .terraform/providers/registry.terraform.io/hashicorp/aws/
+          else
+            echo "❌ AWS provider still not available - this is a critical error"
+            exit 1
+          fi
+        continue-on-error: false
+
+      - name: Terraform Format Check
+        working-directory: terraform-repo/terraform/ecs-services/common-service
+        run: terraform fmt -check
+        continue-on-error: false
+
+      - name: Terraform Validate
+        working-directory: terraform-repo/terraform/ecs-services/common-service
+        run: |
+          echo "🔍 Debug Terraform Configuration:"
+          echo "Working Directory: $(pwd)"
+          echo "Terraform Version: $(terraform version)"
+          echo "Terraform Files:"
+          ls -la *.tf
+          
+          echo "🔍 Running Terraform Validate..."
+          terraform validate
+        continue-on-error: false
+
+      - name: Terraform Plan
+        working-directory: terraform-repo/terraform/ecs-services/common-service
+        env:
+          TF_VAR_image_tag: ${{ needs.tag_and_push_ecr.outputs.tag }}
+          TF_VAR_ecr_repository: ${{ env.ECR_REPOSITORY }}
+          TF_VAR_aws_region: ${{ env.AWS_REGION }}
+          TF_VAR_alb_rule_priority: ${{ env.ALB_RULE_PRIORITY }}
+          TF_VAR_health_check_path: ${{ env.HEALTH_CHECK_PATH }}
+          TF_VAR_alb_path_pattern: '/api/users/*'
+        run: terraform plan -out=tfplan
+        continue-on-error: false
+
+      - name: Terraform Apply
+        working-directory: terraform-repo/terraform/ecs-services/common-service
+        run: terraform apply -auto-approve tfplan
+        continue-on-error: false
+
+      - name: Get Terraform Outputs
+        working-directory: terraform-repo/terraform/ecs-services/common-service
+        run: |
+          echo "Application URL: $(terraform output -raw application_url 2>/dev/null || echo 'Not available')"
+          echo "Load Balancer DNS: $(terraform output -raw load_balancer_dns 2>/dev/null || echo 'Not available')"
+        continue-on-error: true

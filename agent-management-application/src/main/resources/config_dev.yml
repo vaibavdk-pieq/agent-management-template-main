@@ -1,0 +1,64 @@
+# application configuration
+application:
+  name: "agent-management"
+  version: 1.0
+  enableCors: true
+  corsOrigins:
+    - "*"
+
+# Sentry configuration
+sentry:
+  dsn: null  # Set to null to disable Sentry in development
+  debug: false
+
+# Server (Dropwizard configuration)
+server:
+  type: default
+  applicationConnectors:
+    - type: http
+      port: 8085
+  adminConnectors:
+    - type: http
+      port: 8086
+
+# Jersey client configuration
+jerseyClient:
+  timeout: 45s
+  connectionTimeout: 15s
+
+# keycloak configuration
+keycloak:
+  certUrl: http://localhost:9000/realms/pieq-mlb/protocol/openid-connect/certs
+
+# Database configuration
+database:
+  driverClass: org.postgresql.Driver
+  user: postgres
+  password: postgres
+  url: jdbc:postgresql://localhost:5432/agent-management
+
+# Logging configuration
+logging:
+  level: INFO
+  loggers:
+    com.pieq.agentmanagement.agentmanagement: DEBUG
+    io.dropwizard: INFO
+
+# Health checks configuration
+health:
+  healthChecks:
+    - name: database
+      type: ready
+      critical: true
+      initialState: false
+      schedule:
+       checkInterval: 5s
+       downtimeInterval: 30s
+       initialDelay: 5s
+       failureAttempts: 3
+       successAttempts: 2
+
+# TODO: Add additional configuration for the application goes here
+
+
+

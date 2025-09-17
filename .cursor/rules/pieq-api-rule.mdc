@@ -1,0 +1,153 @@
+---
+description: Rules to build API based on Pieq standards
+alwaysApply: false
+---
+
+# Kotlin + Dropwizard REST API
+[These rules guide AI-assisted edits and generation across this repo. Favor correctness, testability, and least surprise.]
+
+## Project Context
+- Language: Kotlin (JDK 21+)
+- Framework: Dropwizard 4.0.6 (Jersey, Jackson, Metrics)
+- Persistence: PostgreSQL via JDBI v3 
+- Tests: JUnit 5, Mockito, Testcontainers (Postgres)
+- AuthN/Z: OAuth2/JWT bearer tokens
+  - `@NoAuthorization` → endpoint is public
+  - `@PieqAuthorization(role = ["..."])` → require any of the listed roles
+- Config: `config_dev.yml`, `config_preprod.yml`, `config_prod.yml`
+- Packaging/Runtime: Fat JAR. Single reusable container image; mount environment-specific config at runtime.
+
+## Dependencies
+aws-sdk = "2.31.77"
+dropwizard = "4.0.6"
+jackson = "2.17.1"
+junit = "5.10.2"
+kotlin = "1.9.22"
+logging = "3.0.5"
+mockk = "1.13.8"
+pieq-core-lib = "1.0.0"
+pieq-http-client-lib = "1.0.2" 
+postgresql = "42.7.3"
+sentry = "7.8.0"
+rs-api = "3.1.0" 
+inject-api = "2.0.1"
+spotless = "7.2.1"
+
+## Architecture & Code Organization
+- Strict layering: **resource (HTTP)** → **service (business)** → **dao/repository (data)**
+- **No** resource → dao calls; all DB access flows through services.
+- Use DTOs on the API surface; never return entities. Provide mappers between entity ↔ DTO.
+- Request validation with `javax.validation` on DTOs; reject invalid payloads with 422.
+- Use dependency injection (constructor injection). Avoid singletons for stateful objects.
+
+## AuthN/Z Enforcement
+- Every endpoint is **protected by default**.
+- Provide a request filter:
+  1. Extract and validate Bearer JWT (signature, `iss`, `aud`, `exp`).
+  2. Build `SecurityContext` with principal and normalized roles.
+  3. Enforce `@NoAuthorization` (skip checks) or `@PieqAuthorization(role=[...])` (allow if any role matches).
+  4. Return `401` when token missing/invalid; `403` when role insufficient.
+- Do not trust client-provided roles blindly; normalize/whitelist known roles.
+
+## Resource Conventions
+- Class-level annotations:  
+  `@Path("/v1/<resource>")`, `@Produces(MediaType.APPLICATION_JSON)`, `@Consumes(MediaType.APPLICATION_JSON)`
+- Endpoints:
+  - `GET /v1/<resource>` list (paginated)
+  - `GET /v1/<resource>/{id}`
+  - `POST /v1/<resource>`
+  - `PUT or PATCH /v1/<resource>/{id}`
+  - `DELETE /v1/<resource>/{id}`
+- Pagination: `limit` (1–100, default 25), `offset` (default 0); return `X-Total-Count`.
+- Idempotency for retryable POSTs: honor `Idempotency-Key` header (service-level de-dup).
+- Use OpenAPI annotations (`io.swagger.v3.oas.annotations`) on resources.
+
+## Error Handling Contract
+Return structured JSON errors (never raw strings). Map common cases:
+
+- 400 → `{ "code": "BAD_REQUEST", "message": "..." }`
+- 401 → `{ "code": "AUTHENTICATION_FAILED", "message": "..." }`
+- 403 → `{ "code": "AUTHORIZATION_FAILED", "message": "..." }`
+- 404 → `{ "code": "NOT_FOUND", "message": "..." }`
+- 409 → `{ "code": "CONFLICT", "message": "..." }`
+- 422 → `{ "code": "VALIDATION_ERROR", "message": "Field X is required", "details": { "field": "X" } }`
+- 500 → `{ "code": "INTERNAL_ERROR", "message": "..." }`
+
+Provide `ExceptionMapper`s for validation and domain exceptions. Include `requestId` in logs and error responses when helpful.
+
+## Logging & Metrics
+- Log one line per request with: `requestId`, method, path, status, latency.
+- Use Dropwizard Metrics timers around service methods with external I/O (DB, HTTP).
+- Avoid logging secrets or raw JWTs.
+
+## Database Rules
+- All schema changes via Flyway migrations; no ad-hoc SQL files.
+- Choose JDBI **or** Hibernate consistently per module.
+  - JDBI: prefer SQL Object or Kotlin-friendly DAO interfaces; bind parameters by name.
+- Include auditing fields on persisted models: `createdAt`, `updatedAt`, `createdBy`, `updatedBy`.
+- Transactions are owned by the service layer.
+
+## Testing Strategy
+- Unit tests for services (mock DAOs/external clients).
+- Resource tests using `ResourceExtension` or `DropwizardAppExtension`.
+- Integration tests spin up Postgres with Testcontainers and run Flyway migrations.
+- Helpers to mint signed JWTs with roles for auth tests.
+
+## Config & Containers
+- Start command: `server <config.yml>`
+- Build **one** image; select environment at runtime by mounting the config:
+  - Local: `java -jar app.jar server config-dev.yml`
+  - Preprod/Prod (ECS): mount appropriate config as `/app/config.yml`, run `server /app/config.yml`
+- No secrets in images or YAML; use env vars + Dropwizard config substitution (`${ENV_VAR:-default}`).
+- Promoting preprod → prod should **reuse the image**; only change task definition (config/env). No rebuild unless code changes.
+
+## Security Hardening
+- Enforce `Content-Type: application/json` for request bodies; reject `text/*`.
+- Validate path and query parameters; clamp pagination inputs.
+- Use strict Jackson configuration: fail on unknown properties for requests.
+- Sanitize all externally visible messages; avoid stack traces in responses.
+
+## Style & Patterns
+- Kotlin style: data classes for DTOs; sealed classes for domain results where helpful.
+- Prefer explicit return types on public functions.
+- Avoid utility singletons; group related functions in services or mappers.
+- Keep resources thin; **no business logic** in resources.
+
+## Example: Resource Scaffold
+```kotlin
+@Path("/v1/policies")
+@Produces(MediaType.APPLICATION_JSON)
+@Consumes(MediaType.APPLICATION_JSON)
+class PolicyResource(
+  private val service: PolicyService
+) {
+
+  @GET
+  @PieqAuthorization(role = ["ADMIN", "BROKER"])
+  fun list(
+    @QueryParam("limit") limit: Int?,
+    @QueryParam("offset") offset: Int?
+  ): Response {
+    val page = service.list(limit ?: 25, offset ?: 0)
+    return Response.ok(page.items)
+      .header("X-Total-Count", page.total)
+      .build()
+  }
+
+  @GET
+  @Path("/{id}")
+  @PieqAuthorization(role = ["ADMIN", "BROKER"])
+  fun get(@PathParam("id") id: UUID): PolicyDto =
+    service.get(id)
+
+  @POST
+  @PieqAuthorization(role = ["ADMIN"])
+  fun create(req: CreatePolicyRequest): PolicyDto =
+    service.create(req)
+
+  @GET
+  @Path("/public/health")
+  @NoAuthorization
+  fun health(): Map<String, String> = mapOf("status" to "ok")
+}
+

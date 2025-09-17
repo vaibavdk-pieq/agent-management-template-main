@@ -1,0 +1,61 @@
+# application configuration
+application:
+  name: "agent-management"
+  version: 1.0
+  enableCors: true
+  corsOrigins:
+    - "*"
+
+# Sentry configuration
+sentry:
+  dsn: sm:sentry_dsn
+  debug: false
+
+# Server (Dropwizard configuration)
+server:
+  type: default
+  applicationConnectors:
+    - type: http
+      port: 8080
+  adminConnectors:
+    - type: http
+      port: 8081
+
+# Jersey client configuration
+jerseyClient:
+  timeout: 45s
+  connectionTimeout: 15s
+
+# keycloak configuration
+keycloak:
+  certUrl: sm:keycloak:cert_url
+
+# Database configuration
+database:
+  driverClass: org.postgresql.Driver
+  user: sm:pieq_db_credential:db_user
+  password: sm:pieq_db_credential:db_password
+  url: sm:pieq_db_credential:db_url
+
+# Logging configuration
+logging:
+  level: INFO
+  loggers:
+    com.pieq.agentmanagement.agentmanagement: INFO
+    io.dropwizard: WARN
+
+# Health checks configuration
+health:
+  healthChecks:
+    - name: database
+      type: ready
+      critical: true
+      initialState: false
+      schedule:
+       checkInterval: 5s
+       downtimeInterval: 30s
+       initialDelay: 5s
+       failureAttempts: 3
+       successAttempts: 2
+
+# TODO: Add additional configuration for the application goes here

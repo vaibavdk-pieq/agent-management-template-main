@@ -1,0 +1,44 @@
+[versions]
+aws-sdk = "2.31.77"
+dropwizard = "4.0.6"
+jackson = "2.17.1"
+junit = "5.10.2"
+kotlin = "1.9.22"
+logging = "3.0.5"
+mockk = "1.13.8"
+pieq-core-lib = "1.0.10"
+pieq-http-client-lib = "1.0.10" 
+postgresql = "42.7.3"
+sentry = "7.8.0"
+rs-api = "3.1.0" 
+inject-api = "2.0.1"
+spotless = "7.2.1"
+
+[plugins]
+kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
+spotless = { id = "com.diffplug.spotless", version.ref = "spotless" }
+application = { id = "application" }
+maven-publish = {id = "maven-publish"}
+jacoco = { id = "jacoco" }
+
+[libraries]
+aws-secretsmanager = { module = "software.amazon.awssdk:secretsmanager", version.ref = "aws-sdk" }
+dropwizard-core = { module = "io.dropwizard:dropwizard-core", version.ref = "dropwizard" }
+dropwizard-jdbi3 = { module = "io.dropwizard:dropwizard-jdbi3", version.ref = "dropwizard" }
+dropwizard-jetty = { module = "io.dropwizard:dropwizard-jetty", version.ref = "dropwizard" }
+dropwizard-testing = { module = "io.dropwizard:dropwizard-testing", version.ref = "dropwizard" }
+dropwizard-validation = { module = "io.dropwizard:dropwizard-validation", version.ref = "dropwizard" }
+jackson-datatype-jsr310 = { module = "com.fasterxml.jackson.datatype:jackson-datatype-jsr310", version.ref = "jackson" }
+jackson-module-kotlin = { module = "com.fasterxml.jackson.module:jackson-module-kotlin", version.ref = "jackson" }
+junit-jupiter = { module = "org.junit.jupiter:junit-jupiter", version.ref = "junit" }
+kotlin-std-lib = { module = "org.jetbrains.kotlin:kotlin-stdlib", version.ref = "kotlin" }
+kotlin-reflect = { module = "org.jetbrains.kotlin:kotlin-reflect", version.ref = "kotlin" }
+kotlin-logging = { module = "io.github.microutils:kotlin-logging-jvm", version.ref = "logging" }
+kotlin-test-junit5 = { module = "org.jetbrains.kotlin:kotlin-test-junit5", version.ref = "kotlin" }
+mockk = { module = "io.mockk:mockk", version.ref = "mockk" }
+jakarta-inject-api = { module = "jakarta.inject:jakarta.inject-api", version.ref = "inject-api" }
+jakarta-rs-api = { module = "jakarta.ws.rs:jakarta.ws.rs-api", version.ref = "rs-api" }
+pieq-core-lib = { module = "com.pieq:pieq-core-lib", version.ref = "pieq-core-lib" }
+pieq-http-client-lib = { module = "com.pieq:pieq-http-client-lib", version.ref = "pieq-http-client-lib" }
+postgresql = { module = "org.postgresql:postgresql", version.ref = "postgresql" }
+sentry = { module = "io.sentry:sentry", version.ref = "sentry" } 

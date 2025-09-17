@@ -1,0 +1,500 @@
+name: "agent-management"
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    types: [opened, reopened, synchronize]
+    branches: [ main ]
+env:
+  # AWS Configuration
+  AWS_REGION: "us-east-1"
+  AWS_ROLE_ARN: "arn:aws:iam::910020091862:role/git-access-role"
+
+  # CodeArtifact Configuration (now centralized in gradle.properties)
+  # All CodeArtifact settings are managed through gradle.properties and setup script
+
+permissions:
+  actions: read
+  contents: read
+  pull-requests: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials using OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Get CodeArtifact token
+        id: codeartifact-auth
+        run: |
+          echo "🔐 Getting CodeArtifact authorization token..."
+          
+          # CodeArtifact configuration (from gradle.properties)
+          CODEARTIFACT_DOMAIN=pieq
+          CODEARTIFACT_DOMAIN_OWNER=910020091862
+          CODEARTIFACT_REGION=us-east-1
+          CODEARTIFACT_REPOSITORY=pieq-artifact
+          
+          echo "📋 Using CodeArtifact configuration:"
+          echo "   Domain: $CODEARTIFACT_DOMAIN"
+          echo "   Domain Owner: $CODEARTIFACT_DOMAIN_OWNER"
+          echo "   Region: $CODEARTIFACT_REGION"
+          echo "   Repository: $CODEARTIFACT_REPOSITORY"
+          
+          export CODEARTIFACT_AUTH_TOKEN=$(aws codeartifact get-authorization-token \
+            --domain "$CODEARTIFACT_DOMAIN" \
+            --domain-owner "$CODEARTIFACT_DOMAIN_OWNER" \
+            --query authorizationToken \
+            --output text)
+
+          echo "✅ CodeArtifact token retrieved successfully!"
+          echo "   Token preview: ${CODEARTIFACT_AUTH_TOKEN:0:20}..."
+
+          echo "CODEARTIFACT_AUTH_TOKEN=$CODEARTIFACT_AUTH_TOKEN" >> $GITHUB_ENV
+          
+          echo "🔗 Getting CodeArtifact repository endpoint..."
+          export CODEARTIFACT_REPO_URL=$(aws codeartifact get-repository-endpoint \
+            --domain "$CODEARTIFACT_DOMAIN" \
+            --domain-owner "$CODEARTIFACT_DOMAIN_OWNER" \
+            --repository "$CODEARTIFACT_REPOSITORY" \
+            --format maven \
+            --query repositoryEndpoint \
+            --output text)
+
+          echo "✅ CodeArtifact repository endpoint retrieved!"
+          echo "   Repository URL: $CODEARTIFACT_REPO_URL"
+          echo "CODEARTIFACT_REPO_URL=$CODEARTIFACT_REPO_URL" >> $GITHUB_ENV
+
+      - name: Verify CodeArtifact configuration
+        run: |
+          echo "🔍 Verifying CodeArtifact configuration..."
+          
+          # CodeArtifact configuration (from gradle.properties)
+          CODEARTIFACT_DOMAIN=pieq
+          CODEARTIFACT_DOMAIN_OWNER=910020091862
+          CODEARTIFACT_REGION=us-east-1
+          CODEARTIFACT_REPOSITORY=pieq-artifact
+          
+          # Test connectivity by listing packages
+          echo "📦 Testing repository connectivity..."
+          aws codeartifact list-packages \
+            --domain "$CODEARTIFACT_DOMAIN" \
+            --domain-owner "$CODEARTIFACT_DOMAIN_OWNER" \
+            --repository "$CODEARTIFACT_REPOSITORY" \
+            --max-items 3 \
+            --query 'packages[0:3].{Package:package,Namespace:namespace,Format:format}' \
+            --output table || echo "⚠️  Could not list packages (this might be normal for empty repositories)"
+          
+          echo "✅ CodeArtifact configuration verified!"
+          echo "   Environment variables set:"
+          echo "   - CODEARTIFACT_AUTH_TOKEN: ${#CODEARTIFACT_AUTH_TOKEN} characters"
+          echo "   - CODEARTIFACT_REPO_URL: $CODEARTIFACT_REPO_URL"
+          echo "   - Configuration source: Direct from workflow (gradle.properties values)"
+
+      - name: Build and test project
+        run: |
+          echo "🏗️  Starting build with CodeArtifact integration..."
+          echo "   Configuration source: Direct from workflow (gradle.properties values)"
+          echo "   Using CodeArtifact repository: $CODEARTIFACT_REPO_URL"
+          echo "   Token available: ${#CODEARTIFACT_AUTH_TOKEN} characters"
+          
+          ./gradlew clean assemble test jacocoTestReport --no-daemon
+          
+          echo "✅ Build and tests completed successfully!"
+          echo "   CodeArtifact integration: Active"
+          echo "   Configuration: Direct from workflow"
+        env:
+          CODEARTIFACT_AUTH_TOKEN: ${{ env.CODEARTIFACT_AUTH_TOKEN }}
+          CODEARTIFACT_REPO_URL: ${{ env.CODEARTIFACT_REPO_URL }}
+
+      - name: Run PMD static analysis
+        run: |
+          echo "🔍 Running PMD static analysis..."
+          # Create reports directory
+          mkdir -p build/reports/pmd
+          
+          # Download PMD
+          wget https://github.com/pmd/pmd/releases/download/pmd_releases%2F6.55.0/pmd-bin-6.55.0.zip
+          unzip pmd-bin-6.55.0.zip
+          
+          # Find all Kotlin source directories
+          echo "📁 Searching for Kotlin source files..."
+          find . -name "*.kt" -type f | head -10
+          
+          # Run PMD on all subprojects with Kotlin source
+          echo "📝 Running PMD analysis on Kotlin files..."
+          
+          # Run PMD on all subprojects with Kotlin source
+          echo "📝 Running PMD analysis on all Kotlin files..."
+          
+          # Create a combined report
+          touch build/reports/pmd/pmd-report.txt
+          touch build/reports/pmd/pmd-report.xml
+          
+          # Analyze agent-management-application
+          if [ -d "agent-management-application/src/main/kotlin" ]; then
+            echo "✅ Analyzing agent-management-application Kotlin sources"
+            ./pmd-bin-6.55.0/bin/run.sh pmd \
+              -d agent-management-application/src/main/kotlin \
+              -R rulesets/java/quickstart.xml \
+              -f text \
+              --fail-on-violation false >> build/reports/pmd/pmd-report.txt 2>&1 || echo "PMD analysis completed with findings"
+            
+            ./pmd-bin-6.55.0/bin/run.sh pmd \
+              -d agent-management-application/src/main/kotlin \
+              -R rulesets/java/quickstart.xml \
+              -f xml \
+              --fail-on-violation false >> build/reports/pmd/pmd-report.xml 2>&1 || echo "PMD XML report generated"
+          fi
+          
+          # Analyze agent-management-api
+          if [ -d "agent-management-api/src/main/kotlin" ]; then
+            echo "✅ Analyzing agent-management-api Kotlin sources"
+            ./pmd-bin-6.55.0/bin/run.sh pmd \
+              -d agent-management-api/src/main/kotlin \
+              -R rulesets/java/quickstart.xml \
+              -f text \
+              --fail-on-violation false >> build/reports/pmd/pmd-report.txt 2>&1 || echo "PMD analysis completed with findings"
+            
+            ./pmd-bin-6.55.0/bin/run.sh pmd \
+              -d agent-management-api/src/main/kotlin \
+              -R rulesets/java/quickstart.xml \
+              -f xml \
+              --fail-on-violation false >> build/reports/pmd/pmd-report.xml 2>&1 || echo "PMD XML report generated"
+          fi
+          
+          # Analyze agent-management-client
+          if [ -d "agent-management-client/src/main/kotlin" ]; then
+            echo "✅ Analyzing agent-management-client Kotlin sources"
+            ./pmd-bin-6.55.0/bin/run.sh pmd \
+              -d agent-management-client/src/main/kotlin \
+              -R rulesets/java/quickstart.xml \
+              -f text \
+              --fail-on-violation false >> build/reports/pmd/pmd-report.txt 2>&1 || echo "PMD analysis completed with findings"
+            
+            ./pmd-bin-6.55.0/bin/run.sh pmd \
+              -d agent-management-client/src/main/kotlin \
+              -R rulesets/java/quickstart.xml \
+              -f xml \
+              --fail-on-violation false >> build/reports/pmd/pmd-report.xml 2>&1 || echo "PMD XML report generated"
+          fi
+          
+          # Check if any analysis was performed
+          if [ ! -s build/reports/pmd/pmd-report.txt ]; then
+            echo "⚠️  No Kotlin sources found in any subproject"
+            echo "PMD analysis skipped - no source files found" > build/reports/pmd/pmd-report.txt
+            echo "PMD analysis skipped - no source files found" > build/reports/pmd/pmd-report.xml
+          fi
+          
+          echo "✅ PMD analysis completed"
+
+      - name: Run SpotBugs analysis
+        run: |
+          echo "🐛 Running SpotBugs analysis..."
+          # Download SpotBugs
+          wget https://github.com/spotbugs/spotbugs/releases/download/4.7.3/spotbugs-4.7.3.tgz
+          tar -xzf spotbugs-4.7.3.tgz
+          
+          # Find all Kotlin compiled classes directories
+          echo "🔍 Searching for Kotlin compiled classes..."
+          
+          CLASSES_DIRS=""
+          
+          # Check agent-management-application
+          if [ -d "agent-management-application/build/classes/kotlin/main" ]; then
+            CLASSES_DIRS="$CLASSES_DIRS agent-management-application/build/classes/kotlin/main"
+            echo "✅ Found agent-management-application classes"
+          fi
+          
+          # Check agent-management-api
+          if [ -d "agent-management-api/build/classes/kotlin/main" ]; then
+            CLASSES_DIRS="$CLASSES_DIRS agent-management-api/build/classes/kotlin/main"
+            echo "✅ Found agent-management-api classes"
+          fi
+          
+          # Check agent-management-client
+          if [ -d "agent-management-client/build/classes/kotlin/main" ]; then
+            CLASSES_DIRS="$CLASSES_DIRS agent-management-client/build/classes/kotlin/main"
+            echo "✅ Found agent-management-client classes"
+          fi
+          
+          # Check root build directory
+          if [ -d "build/classes/kotlin/main" ]; then
+            CLASSES_DIRS="$CLASSES_DIRS build/classes/kotlin/main"
+            echo "✅ Found root build classes"
+          fi
+          
+          if [ -z "$CLASSES_DIRS" ]; then
+            echo "⚠️  No Kotlin classes found, searching for any compiled classes..."
+            find . -name "*.class" -type f | head -5
+            echo "✅ SpotBugs analysis skipped (no compiled classes)"
+            exit 0
+          fi
+          
+          echo "📁 Using classes directories: $CLASSES_DIRS"
+          
+          # Run SpotBugs analysis on all Kotlin compiled classes
+          ./spotbugs-4.7.3/bin/spotbugs \
+            -textui \
+            -effort:max \
+            -low \
+            -xml:withMessages \
+            -output build/reports/spotbugs.xml \
+            $CLASSES_DIRS || echo "SpotBugs analysis completed"
+          echo "✅ SpotBugs analysis completed"
+
+      - name: Run Kotlin-specific static analysis
+        run: |
+          echo "🔍 Running Kotlin-specific static analysis..."
+          mkdir -p build/reports/kotlin-analysis
+          
+          # Check if we're in a multi-project setup
+          echo "📁 Project structure check..."
+          ls -la
+          echo "📁 Subprojects:"
+          ls -la */src/main/kotlin/ 2>/dev/null || echo "No subproject Kotlin sources found"
+          
+          # Run ktlint for Kotlin code style checking
+          echo "📝 Running ktlint..."
+          ./gradlew ktlintCheck --no-daemon > build/reports/kotlin-analysis/ktlint-report.txt 2>&1 || echo "ktlint completed with findings"
+          
+          # Run detekt for Kotlin static analysis (if available)
+          echo "🔍 Running detekt..."
+          ./gradlew detekt --no-daemon > build/reports/kotlin-analysis/detekt-report.txt 2>&1 || echo "detekt completed with findings"
+          
+          # Also run spotless for code formatting check
+          echo "🎨 Running spotless check..."
+          ./gradlew spotlessCheck --no-daemon > build/reports/kotlin-analysis/spotless-report.txt 2>&1 || echo "spotless completed with findings"
+          
+          echo "✅ Kotlin-specific analysis completed"
+
+      - name: Display comprehensive results
+        run: |
+          echo "🎉 All checks completed successfully!"
+          echo ""
+          echo "📊 Summary:"
+          echo "  ✅ Build: Completed"
+          echo "  ✅ Tests: Completed"
+          echo "  ✅ PMD Static Analysis: Completed"
+          echo "  ✅ SpotBugs Analysis: Completed"
+          echo "  ✅ Kotlin-specific Analysis: Completed"
+          echo ""
+          echo "🔐 CodeArtifact Integration:"
+          echo "  ✅ Token retrieved and configured"
+          echo "  ✅ Repository endpoint: $CODEARTIFACT_REPO_URL"
+          echo "  ✅ Build dependencies resolved from CodeArtifact"
+          echo "  ✅ Direct configuration from workflow"
+          echo ""
+          
+          # Show test coverage summary
+          if [ -f "build/reports/jacoco/test/jacocoTestReport.xml" ]; then
+            echo "📈 Test Coverage Report:"
+            echo "  Location: build/reports/jacoco/test/"
+            echo "  HTML: build/reports/jacoco/test/html/index.html"
+            
+            # Extract coverage metrics from XML
+            if command -v xmllint >/dev/null 2>&1; then
+              echo "  Coverage Summary:"
+              xmllint --xpath "//report/counter[@type='LINE']/@covered" build/reports/jacoco/test/jacocoTestReport.xml 2>/dev/null | sed 's/covered="//;s/"//' | while read covered; do
+                xmllint --xpath "//report/counter[@type='LINE']/@missed" build/reports/jacoco/test/jacocoTestReport.xml 2>/dev/null | sed 's/missed="//;s/"//' | while read missed; do
+                  total=$((covered + missed))
+                  if [ $total -gt 0 ]; then
+                    percentage=$((covered * 100 / total))
+                    echo "    Line Coverage: $covered/$total lines ($percentage%)"
+                  fi
+                done
+              done
+            fi
+          fi
+          
+          # Show static analysis reports
+          if [ -f "build/reports/spotbugs.xml" ]; then
+            echo "🐛 SpotBugs Report:"
+            echo "  Location: build/reports/spotbugs.xml"
+            
+            # Count SpotBugs findings
+            if command -v xmllint >/dev/null 2>&1; then
+              bug_count=$(xmllint --xpath "count(//BugInstance)" build/reports/spotbugs.xml 2>/dev/null || echo "0")
+              echo "  Findings: $bug_count bugs detected"
+            fi
+          fi
+          
+          # Show PMD findings
+          if [ -f "build/reports/pmd/pmd-report.txt" ]; then
+            echo "🔍 PMD Report:"
+            echo "  Location: build/reports/pmd/pmd-report.txt"
+            
+            # Count PMD violations
+            violation_count=$(grep -c "PMD" build/reports/pmd/pmd-report.txt 2>/dev/null || echo "0")
+            echo "  Violations: $violation_count issues found"
+          fi
+          
+          echo ""
+          echo "🔍 Static analysis results are available in the logs above"
+          echo "📋 All reports are generated in the build/reports/ directory"
+
+      - name: Generate coverage summary
+        if: always()
+        run: |
+          echo "📊 Generating coverage summary..."
+          
+          # Create a summary file
+          cat > build/reports/coverage-summary.md << EOF
+          # Test Coverage Summary
+          
+          ## JaCoCo Coverage Report
+          - **HTML Report**: [View Coverage Report](build/reports/jacoco/test/html/index.html)
+          - **XML Report**: build/reports/jacoco/test/jacocoTestReport.xml
+          
+          ## Static Analysis Reports
+          - **PMD Report**: build/reports/pmd/pmd-report.txt
+          - **SpotBugs Report**: build/reports/spotbugs.xml
+          
+          ## Build Information
+          - **Build Time**: $(date)
+          - **Branch**: ${{ github.ref }}
+          - **Commit**: ${{ github.sha }}
+          EOF
+          
+          echo "✅ Coverage summary generated: build/reports/coverage-summary.md"
+
+      - name: Comment PR with results summary
+        if: github.event_name == 'pull_request' && always()
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            
+            let summary = '## 📊 Build Results Summary\n\n';
+            
+            // Test coverage summary
+            try {
+              const jacocoPath = 'build/reports/jacoco/test/jacocoTestReport.xml';
+              if (fs.existsSync(jacocoPath)) {
+                summary += '### ✅ Test Coverage\n';
+                summary += '- JaCoCo reports generated successfully\n';
+                summary += '- HTML report available in artifacts\n';
+                summary += '- XML report available for CI integration\n\n';
+              }
+            } catch (e) {
+              summary += '### ⚠️ Test Coverage\n';
+              summary += '- Coverage reports not available\n\n';
+            }
+            
+            // Static analysis summary
+            summary += '### 🔍 Static Analysis\n';
+            
+            try {
+              const spotbugsPath = 'build/reports/spotbugs.xml';
+              if (fs.existsSync(spotbugsPath)) {
+                summary += '- ✅ SpotBugs analysis completed\n';
+              }
+            } catch (e) {
+              summary += '- ❌ SpotBugs analysis failed\n';
+            }
+            
+            try {
+              const pmdPath = 'build/reports/pmd/pmd-report.txt';
+              if (fs.existsSync(pmdPath)) {
+                summary += '- ✅ PMD analysis completed\n';
+              }
+            } catch (e) {
+              summary += '- ❌ PMD analysis failed\n';
+            }
+            
+            summary += '\n### 📋 Reports Available\n';
+            summary += '- Test Coverage: Download `test-coverage-reports` artifact\n';
+            summary += '- Static Analysis: Download `static-analysis-reports` artifact\n';
+            summary += '- All Reports: Download `build-reports` artifact\n\n';
+            
+            summary += '### 🔗 Quick Links\n';
+            summary += '- [View Workflow Run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})\n';
+            summary += '- [Download Artifacts](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts)\n';
+            
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: summary
+            });
+
+      - name: Upload test coverage reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: "agent-management"
+          path: |
+            build/reports/jacoco/
+            build/reports/tests/
+          retention-days: 10
+
+      - name: Upload static analysis reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: "agent-management"
+          path: |
+            build/reports/spotbugs.xml
+            build/reports/pmd/
+            build/reports/kotlin-analysis/
+            build/reports/coverage-summary.md
+          retention-days: 10
+
+      - name: Upload build reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: "agent-management"
+          path: |
+            build/reports/
+            build/reports/coverage-summary.md
+          retention-days: 10
+
+      - name: Cleanup temporary files
+        if: always()
+        run: |
+          echo "🧹 Cleaning up temporary files..."
+          rm -f codeartifact.token
+          echo "✅ Cleanup completed"
+
+  # 2️⃣ Manual review reminder only on PRs, after all checks succeed
+  manual_review_notice:
+    name: "agent-management"
+    needs: build
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post PR comment for manual review
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const pr = context.payload.pull_request;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: pr.number,
+              body: [
+                '🔍 **Manual Code Review Required**',
+                '',
+                `@${pr.user.login} your changes have passed all checks:`,
+                '✅ Build completed successfully',
+                '✅ All tests passed',
+                '✅ Static analysis completed',
+                '',
+                'Please review the code, inspect any findings, and approve or request changes before merging.'
+              ].join('\n')
+            });
+

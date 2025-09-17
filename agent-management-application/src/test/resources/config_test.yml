@@ -1,0 +1,55 @@
+pieq:
+  apiVersion: "1.0"
+  enableCors: false
+  corsOrigins:
+    - "*"
+
+# Standard Dropwizard configuration
+server:
+  type: default
+  applicationConnectors:
+    - type: http
+      port: 8080
+  adminConnectors:
+    - type: http
+      port: 8081
+
+# Database configuration
+database:
+  driverClass: org.postgresql.Driver
+  user: postgres
+  password: postgres
+  url: jdbc:postgresql://localhost:5432/postgres
+
+# Jersey client configuration
+jerseyClient:
+  timeout: 45s
+  connectionTimeout: 15s
+
+# Sentry configuration
+sentry:
+  dsn: null
+  debug: false
+
+# Logging configuration
+logging:
+  level: WARN
+  loggers:
+    com.pieq.agentmanagement.application: INFO
+
+# Health checks configuration
+health:
+  healthChecks:
+    - name: database
+      type: ready
+      critical: true
+      initialState: false
+      schedule:
+       checkInterval: 5s
+       downtimeInterval: 30s
+       initialDelay: 5s
+       failureAttempts: 3
+       successAttempts: 2
+
+#TODO: Add additional configuration for the application goes here
+
